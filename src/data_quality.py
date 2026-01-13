@@ -13,7 +13,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 class TALEADataQualityChecker:
-    """Validate data quality before analysis"""
+    """Data validator before analysis"""
 
     def __init__(self):
         self.quality_reports = {}
