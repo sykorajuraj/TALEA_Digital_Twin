@@ -6,16 +6,12 @@ Organization: Alma Mater Studiorum - Università di Bologna
 
 Data validation and quality checks module before analysis
 """
-
+from data_preprocessor import ProcessingConfig, DatasetConfig
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional
 import warnings
 warnings.filterwarnings('ignore')
-
-# ============================================================================
-# DATA QUALITY CHECKER
-# ============================================================================
 
 class TALEADataQualityChecker:
     """Data validator before analysis"""    
