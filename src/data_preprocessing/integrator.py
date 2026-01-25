@@ -24,8 +24,14 @@ warnings.filterwarnings('ignore')
 class DataIntegrator:
     """Handles integration of processed datasets"""
     
-    def __init__(self):
-        pass
+    def __init__(self, csv_separator: str = ';'):
+        """
+        Initialize DataIntegrator
+        
+        Args:
+            csv_separator: Separator to use for CSV exports (default: ';')
+        """
+        self.csv_separator = csv_separator
     
     # TEMPORAL INTEGRATION
     
@@ -62,8 +68,8 @@ class DataIntegrator:
         
         # Create merge keys based on resolution
         if weather_resolution == 'hourly':
-            mobility['merge_key'] = mobility[mobility_date_col].dt.floor('H')
-            weather['merge_key'] = weather[weather_date_col].dt.floor('H')
+            mobility['merge_key'] = mobility[mobility_date_col].dt.floor('h')
+            weather['merge_key'] = weather[weather_date_col].dt.floor('h')
         elif weather_resolution == 'daily':
             mobility['merge_key'] = mobility[mobility_date_col].dt.date
             weather['merge_key'] = weather[weather_date_col].dt.date
@@ -375,12 +381,14 @@ class DataIntegrator:
             else:
                 # Convert to regular DataFrame for CSV
                 df_export = pd.DataFrame(df.drop(columns='geometry'))
-                df_export.to_csv(output_path, index=False, compression=compression)
+                df_export.to_csv(output_path, index=False, sep=self.csv_separator, 
+                                compression=compression)
         
         # Handle regular DataFrame
         else:
             if format == 'csv':
-                df.to_csv(output_path, index=False, compression=compression)
+                df.to_csv(output_path, index=False, sep=self.csv_separator, 
+                         compression=compression)
             elif format == 'parquet':
                 df.to_parquet(output_path, compression=compression, index=False)
             elif format == 'feather':
