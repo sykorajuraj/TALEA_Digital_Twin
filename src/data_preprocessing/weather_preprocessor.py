@@ -109,8 +109,9 @@ class WeatherPreprocessor:
         }
         df = df.rename(columns=column_mapping)
         
-        # Convert to datetime
-        df[ColumnNames.DATETIME.value] = pd.to_datetime(df[ColumnNames.DATETIME.value])
+        # Convert to datetime with timezone handling
+        df[ColumnNames.DATETIME.value] = pd.to_datetime(df[ColumnNames.DATETIME.value], utc=True)
+        df[ColumnNames.DATETIME.value] = df[ColumnNames.DATETIME.value].dt.tz_localize(None)
         
         # Convert to numeric
         for col in [ColumnNames.TEMPERATURE.value, ColumnNames.TEMP_MAX.value, 
@@ -143,8 +144,9 @@ class WeatherPreprocessor:
         }
         df = df.rename(columns=column_mapping)
         
-        # Convert to datetime
-        df[ColumnNames.DATETIME.value] = pd.to_datetime(df[ColumnNames.DATETIME.value])
+        # Convert to datetime with timezone handling
+        df[ColumnNames.DATETIME.value] = pd.to_datetime(df[ColumnNames.DATETIME.value], utc=True)
+        df[ColumnNames.DATETIME.value] = df[ColumnNames.DATETIME.value].dt.tz_localize(None)
         
         # Convert to numeric
         df[ColumnNames.PRECIPITATION.value] = pd.to_numeric(
@@ -172,9 +174,10 @@ class WeatherPreprocessor:
         """Process air quality data"""
         df = df.copy()
         
-        # Convert reftime to datetime
+        # Convert reftime to datetime with timezone handling
         if 'reftime' in df.columns:
-            df[ColumnNames.DATETIME.value] = pd.to_datetime(df['reftime'])
+            df[ColumnNames.DATETIME.value] = pd.to_datetime(df['reftime'], utc=True)
+            df[ColumnNames.DATETIME.value] = df[ColumnNames.DATETIME.value].dt.tz_localize(None)
         
         # Pivot to wide format (one column per pollutant)
         if 'agent atm' in df.columns and 'value' in df.columns:
@@ -194,24 +197,6 @@ class WeatherPreprocessor:
             
             return df_pivot
         
-        return df
-    
-    def interpolate_weather_grid(self, df: pd.DataFrame,
-                                 spatial_resolution: float = 0.01) -> pd.DataFrame:
-        """
-        Interpolate weather data to spatial grid
-        (Placeholder for spatial interpolation)
-        
-        Args:
-            df: Weather dataframe
-            spatial_resolution: Grid resolution in degrees
-            
-        Returns:
-            Interpolated weather data
-        """
-        # This is a placeholder - full implementation would use
-        # geostatistical methods like kriging
-        print("⚠ Spatial interpolation not yet implemented")
         return df
     
     def compute_heat_indices(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -297,6 +282,11 @@ class WeatherPreprocessor:
         
         if ColumnNames.DATETIME.value not in df.columns:
             raise ValueError("Dataframe must contain datetime column")
+        
+        # Ensure no timezone
+        df[ColumnNames.DATETIME.value] = pd.to_datetime(df[ColumnNames.DATETIME.value])
+        if df[ColumnNames.DATETIME.value].dt.tz is not None:
+            df[ColumnNames.DATETIME.value] = df[ColumnNames.DATETIME.value].dt.tz_localize(None)
         
         # Set datetime as index
         df = df.set_index(ColumnNames.DATETIME.value)

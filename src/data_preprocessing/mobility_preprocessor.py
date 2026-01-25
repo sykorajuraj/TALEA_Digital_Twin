@@ -74,9 +74,12 @@ class BicycleCounterPreprocessor:
         """
         df = df.copy()
         
-        # Convert date column to datetime
+        # Convert date column to datetime with UTC timezone handling
         if 'Data' in df.columns:
-            df['Data'] = pd.to_datetime(df['Data'])
+            # First convert to datetime, handling mixed timezones by converting to UTC
+            df['Data'] = pd.to_datetime(df['Data'], utc=True)
+            # Then remove timezone info for consistency
+            df['Data'] = df['Data'].dt.tz_localize(None)
         
         # Clean numeric columns
         count_columns = ['Direzione centro', 'Direzione periferia', 'Totale']
@@ -237,7 +240,8 @@ class PedestrianFlowPreprocessor:
         
          # Convert date column
         if 'Data' in df.columns:
-            df['Data'] = pd.to_datetime(df['Data'])
+            df['Data'] = pd.to_datetime(df['Data'], utc=True)
+            df['Data'] = df['Data'].dt.tz_localize(None)
             df['datetime'] = df['Data']
         
         # Clean visitor counts
@@ -348,7 +352,8 @@ class TrafficPreprocessor:
         
         # Convert date column
         if 'data' in df.columns:
-            df['data'] = pd.to_datetime(df['data'])
+            df['data'] = pd.to_datetime(df['data'], utc=True)
+            df['data'] = df['data'].dt.tz_localize(None)
         
         # Identify and process time slot columns
         time_cols = [col for col in df.columns 
