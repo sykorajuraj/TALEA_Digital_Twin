@@ -9,8 +9,9 @@ Computes various heat stress indices and classification levels.
 
 import pandas as pd
 import numpy as np
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Tuple
 from dataclasses import dataclass
+from scipy import stats
 
 
 @dataclass
@@ -47,6 +48,7 @@ class HeatStressCalculator:
             thresholds: Custom thresholds (uses defaults if None)
         """
         self.thresholds = thresholds or HeatStressThresholds()
+        self._uncertainty_estimates = {}  # Store uncertainty for predictions
     
     def compute_heat_index(self, 
                           temperature: Union[float, pd.Series], 
@@ -81,6 +83,184 @@ class HeatStressCalculator:
         hi_c = (hi_f - 32) * 5/9
         
         return hi_c
+    
+    def compute_heat_index_with_uncertainty(self,
+                                           temperature: pd.Series,
+                                           humidity: pd.Series,
+                                           temp_uncertainty: Optional[pd.Series] = None,
+                                           humidity_uncertainty: Optional[pd.Series] = None) -> Tuple[pd.Series, pd.Series]:
+        """
+        Compute Heat Index with uncertainty propagation.
+        
+        Args:
+            temperature: Temperature in Celsius
+            humidity: Relative humidity (0-100)
+            temp_uncertainty: Standard deviation of temperature measurements
+            humidity_uncertainty: Standard deviation of humidity measurements
+            
+        Returns:
+            Tuple of (heat_index_mean, heat_index_std)
+        """
+        # Compute nominal heat index
+        hi_mean = self.compute_heat_index(temperature, humidity)
+        
+        # If no uncertainty provided, estimate from typical sensor errors
+        if temp_uncertainty is None:
+            temp_uncertainty = pd.Series(0.5, index=temperature.index)  # ±0.5°C typical
+        
+        if humidity_uncertainty is None:
+            humidity_uncertainty = pd.Series(3.0, index=humidity.index)  # ±3% typical
+        
+        # Propagate uncertainty using linear approximation (first-order Taylor)
+        # ΔHI ≈ (∂HI/∂T) * ΔT + (∂HI/∂H) * ΔH
+        
+        # Numerical derivatives
+        delta = 0.1
+        
+        # Partial derivative w.r.t. temperature
+        hi_temp_plus = self.compute_heat_index(temperature + delta, humidity)
+        dhi_dtemp = (hi_temp_plus - hi_mean) / delta
+        
+        # Partial derivative w.r.t. humidity
+        hi_humid_plus = self.compute_heat_index(temperature, humidity + delta)
+        dhi_dhumid = (hi_humid_plus - hi_mean) / delta
+        
+        # Combined uncertainty (assuming independent errors)
+        hi_variance = (dhi_dtemp * temp_uncertainty) ** 2 + (dhi_dhumid * humidity_uncertainty) ** 2
+        hi_std = np.sqrt(hi_variance)
+        
+        # Store uncertainty estimates
+        self._uncertainty_estimates['heat_index'] = {
+            'mean': hi_mean,
+            'std': hi_std,
+            'temperature_contribution': np.abs(dhi_dtemp * temp_uncertainty),
+            'humidity_contribution': np.abs(dhi_dhumid * humidity_uncertainty)
+        }
+        
+        return hi_mean, hi_std
+    
+    def estimate_heat_wave_survival_function(self,
+                                            temperature_series: pd.Series,
+                                            threshold: float = 30.0) -> pd.DataFrame:
+        """
+        Estimate survival function for heat wave duration using survival analysis.
+        
+        Args:
+            temperature_series: Time series of temperature values
+            threshold: Temperature threshold defining a heat wave (°C)
+            
+        Returns:
+            DataFrame with survival function and hazard rate
+        """
+        # Identify heat wave periods (consecutive days above threshold)
+        is_heat_wave = temperature_series >= threshold
+        
+        # Find heat wave episodes
+        heat_wave_episodes = []
+        current_duration = 0
+        
+        for is_hot in is_heat_wave:
+            if is_hot:
+                current_duration += 1
+            else:
+                if current_duration > 0:
+                    heat_wave_episodes.append(current_duration)
+                current_duration = 0
+        
+        # Add final episode if ongoing
+        if current_duration > 0:
+            heat_wave_episodes.append(current_duration)
+        
+        if len(heat_wave_episodes) == 0:
+            print("⚠ No heat wave episodes found")
+            return pd.DataFrame()
+        
+        max_duration = max(heat_wave_episodes)
+        
+        # Compute empirical survival function: S(t) = P(Duration > t)
+        # And hazard function: λ(t) = P(end at t | survived to t)
+        
+        survival = []
+        hazard = []
+        
+        for t in range(1, max_duration + 1):
+            # Number still surviving at time t
+            n_surviving = sum(1 for d in heat_wave_episodes if d >= t)
+            # Number that ended at exactly time t
+            n_ending = sum(1 for d in heat_wave_episodes if d == t)
+            
+            # Survival probability
+            s_t = n_surviving / len(heat_wave_episodes)
+            
+            # Hazard rate (conditional probability of ending)
+            # λ(t) = P(T = t | T >= t) = n_ending / n_surviving
+            if n_surviving > 0:
+                lambda_t = n_ending / n_surviving
+            else:
+                lambda_t = 0
+            
+            survival.append(s_t)
+            hazard.append(lambda_t)
+        
+        results = pd.DataFrame({
+            'duration': range(1, max_duration + 1),
+            'survival_probability': survival,
+            'hazard_rate': hazard
+        })
+        
+        # Add cumulative hazard
+        results['cumulative_hazard'] = results['hazard_rate'].cumsum()
+        
+        print(f"✓ Heat wave survival analysis:")
+        print(f"  Total episodes: {len(heat_wave_episodes)}")
+        print(f"  Mean duration: {np.mean(heat_wave_episodes):.1f} days")
+        print(f"  Max duration: {max_duration} days")
+        print(f"  P(duration > 3 days): {results.loc[results['duration']==3, 'survival_probability'].values[0]:.2%}"
+              if len(results) >= 3 else "")
+        
+        return results
+    
+    def compute_heat_stress_with_confidence_intervals(self,
+                                                     temperature: pd.Series,
+                                                     humidity: pd.Series,
+                                                     confidence_level: float = 0.95) -> pd.DataFrame:
+        """
+        Compute heat stress indices with confidence intervals.
+        
+        Args:
+            temperature: Temperature in Celsius
+            humidity: Relative humidity (0-100)
+            confidence_level: Confidence level (e.g., 0.95 for 95% CI)
+            
+        Returns:
+            DataFrame with heat indices and confidence intervals
+        """
+        # Compute mean and uncertainty
+        hi_mean, hi_std = self.compute_heat_index_with_uncertainty(temperature, humidity)
+        
+        # Compute confidence intervals (assuming normal distribution)
+        z_score = stats.norm.ppf((1 + confidence_level) / 2)
+        
+        results = pd.DataFrame({
+            'temperature': temperature,
+            'humidity': humidity,
+            'heat_index_mean': hi_mean,
+            'heat_index_std': hi_std,
+            'heat_index_lower': hi_mean - z_score * hi_std,
+            'heat_index_upper': hi_mean + z_score * hi_std
+        })
+        
+        # Classify based on mean
+        results['stress_level'] = self.classify_stress_levels(hi_mean, 'heat_index')
+        
+        # Add probability of exceeding danger threshold
+        if isinstance(hi_mean, pd.Series):
+            danger_threshold = self.thresholds.HI_DANGER
+            # P(HI > threshold) using normal CDF
+            z = (danger_threshold - hi_mean) / hi_std
+            results['prob_danger'] = 1 - stats.norm.cdf(z)
+        
+        return results
     
     def _rothfusz_regression(self, temp_f: Union[float, pd.Series], 
                             rh: Union[float, pd.Series]) -> Union[float, pd.Series]:
@@ -231,7 +411,8 @@ class HeatStressCalculator:
                            temperature: pd.Series,
                            humidity: pd.Series,
                            wind_speed: Optional[pd.Series] = None,
-                           solar_radiation: Optional[pd.Series] = None) -> pd.DataFrame:
+                           solar_radiation: Optional[pd.Series] = None,
+                           include_uncertainty: bool = False) -> pd.DataFrame:
         """
         Compute all heat stress indices at once
         
@@ -240,14 +421,22 @@ class HeatStressCalculator:
             humidity: Relative humidity (0-100)
             wind_speed: Wind speed in m/s (optional)
             solar_radiation: Solar radiation in W/m² (optional)
+            include_uncertainty: Whether to include uncertainty estimates
             
         Returns:
             DataFrame with all indices and classifications
         """
         results = pd.DataFrame(index=temperature.index)
         
-        # Heat Index (only needs temp and humidity)
-        results['heat_index'] = self.compute_heat_index(temperature, humidity)
+        if include_uncertainty:
+            # Probabilistic approach with confidence intervals
+            hi_mean, hi_std = self.compute_heat_index_with_uncertainty(temperature, humidity)
+            results['heat_index'] = hi_mean
+            results['heat_index_std'] = hi_std
+        else:
+            # Deterministic approach
+            results['heat_index'] = self.compute_heat_index(temperature, humidity)
+        
         results['heat_index_level'] = self.classify_stress_levels(
             results['heat_index'], 'heat_index'
         )
