@@ -15,6 +15,7 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+from scipy import stats
 
 
 class ColumnNames(Enum):
@@ -47,6 +48,10 @@ class ProcessingConfig:
     MORNING_PEAK_END: int = 9
     EVENING_PEAK_START: int = 17
     EVENING_PEAK_END: int = 19
+    
+    # Window parameters (for sequence analysis)
+    DEFAULT_WINDOW_LENGTH: int = 10
+    MAX_AUTOCORR_LAG: int = 48  # For detecting periodicity
     
     def __post_init__(self):
         if self.TIME_PERIOD_BINS is None:
@@ -164,6 +169,52 @@ class BicycleCounterPreprocessor:
         
         return df
     
+    def compute_optimal_window_length(self,
+                                     df: pd.DataFrame,
+                                     value_col: str = 'Totale',
+                                     max_lag: Optional[int] = None,
+                                     correlation_threshold: float = 0.3) -> int:
+        """
+        Compute optimal window length based on autocorrelation analysis.
+        Based on PDF 6: pick window length where correlation becomes negligible.
+        
+        Args:
+            df: Bicycle counter dataframe
+            value_col: Column to analyze
+            max_lag: Maximum lag to test (defaults to config)
+            correlation_threshold: Correlation threshold for window cutoff
+            
+        Returns:
+            Optimal window length
+        """
+        if value_col not in df.columns:
+            raise ValueError(f"Column '{value_col}' not found")
+        
+        if max_lag is None:
+            max_lag = self.config.MAX_AUTOCORR_LAG
+        
+        series = df[value_col].dropna()
+        
+        if len(series) < max_lag + 1:
+            max_lag = len(series) - 1
+        
+        # Compute autocorrelation
+        acf_values = []
+        for lag in range(1, max_lag + 1):
+            corr = series.iloc[:-lag].corr(series.iloc[lag:])
+            acf_values.append(abs(corr) if not np.isnan(corr) else 0.0)
+        
+        # Find where correlation drops below threshold
+        optimal_length = self.config.DEFAULT_WINDOW_LENGTH
+        for i, acf in enumerate(acf_values):
+            if acf < correlation_threshold:
+                optimal_length = i + 1
+                break
+        
+        print(f"  ✓ Optimal window length: {optimal_length} (correlation threshold: {correlation_threshold})")
+        
+        return optimal_length
+    
     def add_derived_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Add derived features for bicycle data
@@ -194,19 +245,6 @@ class BicycleCounterPreprocessor:
         if 'Data' in df.columns and 'datetime' not in df.columns:
             df['datetime'] = pd.to_datetime(df['Data'])
         
-        # Flow ratio
-        if all(col in df.columns for col in ['Direzione centro', 'Direzione periferia']):
-            df['flow_ratio'] = np.where(
-                df['Direzione periferia'] > 0,
-                df['Direzione centro'] / df['Direzione periferia'],
-                np.nan
-            )
-            
-            df['dominant_direction'] = np.where(
-                df['Direzione centro'] > df['Direzione periferia'],
-                'centro', 'periferia'
-            )
-        
         # Peak hour indicator
         hour_col = 'Data' if 'Data' in df.columns else 'datetime'
         if hour_col in df.columns:
@@ -216,6 +254,50 @@ class BicycleCounterPreprocessor:
                                self.config.EVENING_PEAK_START <= x <= self.config.EVENING_PEAK_END)
                 else 0
             )
+        
+        return df
+    
+    def add_window_features(self,
+                           df: pd.DataFrame,
+                           value_col: str = 'Totale',
+                           window_lengths: List[int] = None) -> pd.DataFrame:
+        """
+        Add rolling window features for capturing temporal patterns.
+        Based on PDF concepts: window-based features capture short-term dependencies.
+        
+        Args:
+            df: Bicycle counter dataframe
+            value_col: Column to compute windows over
+            window_lengths: List of window sizes (defaults to [3, 6, 12, 24])
+            
+        Returns:
+            Dataframe with window features
+        """
+        df = df.copy()
+        
+        if value_col not in df.columns:
+            return df
+        
+        if window_lengths is None:
+            window_lengths = [3, 6, 12, 24]  # Hours for hourly data
+        
+        for window in window_lengths:
+            # Rolling mean
+            df[f'{value_col}_ma{window}'] = df[value_col].rolling(
+                window=window, min_periods=1
+            ).mean()
+            
+            # Rolling std (volatility)
+            df[f'{value_col}_std{window}'] = df[value_col].rolling(
+                window=window, min_periods=1
+            ).std()
+            
+            # Rolling max
+            df[f'{value_col}_max{window}'] = df[value_col].rolling(
+                window=window, min_periods=1
+            ).max()
+        
+        print(f"  ✓ Added window features for {len(window_lengths)} window sizes")
         
         return df
 
@@ -238,24 +320,20 @@ class PedestrianFlowPreprocessor:
         """
         df = df.copy()
         
-         # Convert date column
+        # Convert date with timezone handling
         if 'Data' in df.columns:
             df['Data'] = pd.to_datetime(df['Data'], utc=True)
             df['Data'] = df['Data'].dt.tz_localize(None)
-            df['datetime'] = df['Data']
         
-        # Clean visitor counts
+        # Clean count column
         if 'Numero di visitatori' in df.columns:
             df['Numero di visitatori'] = pd.to_numeric(
-                df['Numero di visitatori'], errors='coerce'
-            ).fillna(0)
-        
-        # Create route identifier
-        if 'Area provenienza' in df.columns and 'Area Arrivo' in df.columns:
-            df['route'] = df['Area provenienza'] + ' → ' + df['Area Arrivo']
+                df['Numero di visitatori'], 
+                errors='coerce'
+            )
         
         # Remove duplicates
-        key_columns = ['Data', 'route']
+        key_columns = ['Data', 'Area provenienza', 'Area Arrivo']
         existing_cols = [col for col in key_columns if col in df.columns]
         if existing_cols:
             df = df.drop_duplicates(subset=existing_cols)
@@ -263,13 +341,16 @@ class PedestrianFlowPreprocessor:
         return df
     
     def normalize_flow_values(self, df: pd.DataFrame,
-                              method: str = 'minmax') -> pd.DataFrame:
+                              method: str = 'minmax',
+                              by_time_of_day: bool = False) -> pd.DataFrame:
         """
-        Normalize pedestrian flow values
+        Normalize pedestrian flow values.
+        Enhanced with time-dependent normalization option (inspired by PDF 7).
         
         Args:
             df: Pedestrian flow dataframe
             method: Normalization method ('minmax' or 'zscore')
+            by_time_of_day: If True, normalize separately per time period
             
         Returns:
             Dataframe with normalized values
@@ -281,15 +362,35 @@ class PedestrianFlowPreprocessor:
         
         col = 'Numero di visitatori'
         
-        if method == 'minmax':
-            min_val = df[col].min()
-            max_val = df[col].max()
-            df[f'{col}_normalized'] = (df[col] - min_val) / (max_val - min_val)
-        
-        elif method == 'zscore':
-            mean_val = df[col].mean()
-            std_val = df[col].std()
-            df[f'{col}_normalized'] = (df[col] - mean_val) / std_val
+        if by_time_of_day and 'Data' in df.columns:
+            # Time-dependent normalization
+            df['hour'] = pd.to_datetime(df['Data']).dt.hour
+            
+            def normalize_group(group):
+                values = group[col]
+                if method == 'minmax':
+                    min_val = values.min()
+                    max_val = values.max()
+                    if max_val > min_val:
+                        return (values - min_val) / (max_val - min_val)
+                    return pd.Series(0.5, index=values.index)
+                elif method == 'zscore':
+                    return (values - values.mean()) / (values.std() + 1e-8)
+                return values
+            
+            df[f'{col}_normalized'] = df.groupby('hour')[col].transform(normalize_group)
+            
+        else:
+            # Global normalization
+            if method == 'minmax':
+                min_val = df[col].min()
+                max_val = df[col].max()
+                df[f'{col}_normalized'] = (df[col] - min_val) / (max_val - min_val)
+            
+            elif method == 'zscore':
+                mean_val = df[col].mean()
+                std_val = df[col].std()
+                df[f'{col}_normalized'] = (df[col] - mean_val) / std_val
         
         return df
     
