@@ -161,21 +161,23 @@ class CorrelationAnalyzer:
     
     def __init__(self):
         """Initialize correlation analyzer"""
-        pass
+        self._correlation_history = {}  # Store time-varying correlations
     
     def compute_weather_mobility_correlations(self,
                                              mobility_df: pd.DataFrame,
                                              weather_df: pd.DataFrame,
                                              mobility_col: str = 'count',
-                                             weather_cols: Optional[List[str]] = None) -> pd.DataFrame:
+                                             weather_cols: Optional[List[str]] = None,
+                                             stratify_by: Optional[str] = None) -> pd.DataFrame:
         """
-        Compute correlations between mobility and weather
+        Compute correlations between mobility and weather with optional stratification.
         
         Args:
             mobility_df: Mobility data
             weather_df: Weather data
             mobility_col: Mobility column to correlate
             weather_cols: Weather columns (if None, uses all numeric)
+            stratify_by: Column to stratify analysis (e.g., 'hour', 'weekday')
             
         Returns:
             DataFrame with correlation results
@@ -191,7 +193,13 @@ class CorrelationAnalyzer:
             weather_cols = merged.select_dtypes(include=[np.number]).columns.tolist()
             weather_cols = [c for c in weather_cols if c != mobility_col]
         
-        # Compute correlations
+        # If stratification requested, compute within each stratum
+        if stratify_by is not None:
+            return self._compute_stratified_correlations(
+                merged, mobility_col, weather_cols, stratify_by
+            )
+        
+        # Compute overall correlations
         correlations = []
         
         for weather_col in weather_cols:
@@ -199,23 +207,216 @@ class CorrelationAnalyzer:
                 clean = merged[[mobility_col, weather_col]].dropna()
                 
                 if len(clean) > 2:
-                    corr, p_value = stats.pearsonr(clean[mobility_col], clean[weather_col])
+                    # Pearson correlation (linear)
+                    pearson_r, pearson_p = stats.pearsonr(clean[mobility_col], clean[weather_col])
+                    
+                    # Spearman correlation (monotonic, more robust)
+                    spearman_r, spearman_p = stats.spearmanr(clean[mobility_col], clean[weather_col])
                     
                     correlations.append({
                         'weather_variable': weather_col,
-                        'correlation': corr,
-                        'p_value': p_value,
-                        'is_significant': p_value < 0.05,
+                        'pearson_correlation': pearson_r,
+                        'pearson_p_value': pearson_p,
+                        'spearman_correlation': spearman_r,
+                        'spearman_p_value': spearman_p,
+                        'is_significant': pearson_p < 0.05 or spearman_p < 0.05,
                         'n_observations': len(clean)
                     })
         
-        result_df = pd.DataFrame(correlations).sort_values('correlation', 
+        result_df = pd.DataFrame(correlations).sort_values('pearson_correlation', 
                                                             key=abs, 
                                                             ascending=False)
         
         print(f"  ✓ Computed {len(result_df)} weather-mobility correlations")
         
         return result_df
+    
+    def _compute_stratified_correlations(self,
+                                        merged: pd.DataFrame,
+                                        mobility_col: str,
+                                        weather_cols: List[str],
+                                        stratify_by: str) -> pd.DataFrame:
+        """
+        Compute correlations within temporal strata.
+        """
+        # Extract stratification variable
+        if stratify_by not in merged.columns:
+            # Try to extract from datetime
+            if 'datetime' in merged.columns or 'Data' in merged.columns:
+                date_col = 'datetime' if 'datetime' in merged.columns else 'Data'
+                dt = pd.to_datetime(merged[date_col])
+                
+                if stratify_by == 'hour':
+                    merged[stratify_by] = dt.dt.hour
+                elif stratify_by == 'weekday':
+                    merged[stratify_by] = dt.dt.weekday
+                elif stratify_by == 'month':
+                    merged[stratify_by] = dt.dt.month
+        
+        stratified_results = []
+        
+        for stratum_value, group in merged.groupby(stratify_by):
+            for weather_col in weather_cols:
+                if weather_col in group.columns:
+                    clean = group[[mobility_col, weather_col]].dropna()
+                    
+                    if len(clean) > 5:  # Need more samples per stratum
+                        corr, p_value = stats.pearsonr(clean[mobility_col], clean[weather_col])
+                        
+                        stratified_results.append({
+                            'weather_variable': weather_col,
+                            f'{stratify_by}': stratum_value,
+                            'correlation': corr,
+                            'p_value': p_value,
+                            'is_significant': p_value < 0.05,
+                            'n_observations': len(clean)
+                        })
+        
+        result_df = pd.DataFrame(stratified_results)
+        
+        print(f"  ✓ Computed stratified correlations by {stratify_by}")
+        
+        return result_df
+    
+    def compute_time_lagged_correlations(self,
+                                        series1: pd.Series,
+                                        series2: pd.Series,
+                                        max_lag: int = 24) -> pd.DataFrame:
+        """
+        Compute correlations at different time lags.
+        
+        Args:
+            series1: First time series
+            series2: Second time series
+            max_lag: Maximum lag to test (in time steps)
+            
+        Returns:
+            DataFrame with correlation at each lag
+        """
+        results = []
+        
+        for lag in range(-max_lag, max_lag + 1):
+            if lag < 0:
+                # series1 leads series2
+                s1 = series1.iloc[:lag]
+                s2 = series2.iloc[-lag:]
+            elif lag > 0:
+                # series2 leads series1
+                s1 = series1.iloc[lag:]
+                s2 = series2.iloc[:-lag]
+            else:
+                # No lag
+                s1 = series1
+                s2 = series2
+            
+            # Align indices
+            common_idx = s1.index.intersection(s2.index)
+            if len(common_idx) > 10:
+                s1_aligned = s1.loc[common_idx]
+                s2_aligned = s2.loc[common_idx]
+                
+                corr, p_value = stats.pearsonr(s1_aligned, s2_aligned)
+                
+                results.append({
+                    'lag': lag,
+                    'correlation': corr,
+                    'p_value': p_value,
+                    'is_significant': p_value < 0.05,
+                    'n_observations': len(common_idx)
+                })
+        
+        result_df = pd.DataFrame(results)
+        
+        # Find optimal lag
+        if len(result_df) > 0:
+            optimal_lag = result_df.loc[result_df['correlation'].abs().idxmax(), 'lag']
+            optimal_corr = result_df.loc[result_df['correlation'].abs().idxmax(), 'correlation']
+            
+            print(f"  ✓ Optimal lag: {optimal_lag} (correlation={optimal_corr:.3f})")
+        
+        return result_df
+    
+    def compute_weighted_correlation(self,
+                                   df: pd.DataFrame,
+                                   col1: str,
+                                   col2: str,
+                                   weight_col: str,
+                                   method: str = 'pearson') -> Dict:
+        """
+        Compute weighted correlation coefficient.
+
+        Args:
+            df: DataFrame with data
+            col1: First column
+            col2: Second column
+            weight_col: Column with sample weights
+            method: 'pearson' or 'spearman'
+            
+        Returns:
+            Dictionary with correlation results
+        """
+        clean = df[[col1, col2, weight_col]].dropna()
+        
+        if len(clean) < 3:
+            return {'correlation': np.nan, 'n_observations': len(clean)}
+        
+        x = clean[col1].values
+        y = clean[col2].values
+        w = clean[weight_col].values
+        
+        # Normalize weights
+        w = w / w.sum()
+        
+        if method == 'pearson':
+            # Weighted Pearson correlation
+            # Formula: cov_w(X,Y) / (std_w(X) * std_w(Y))
+            
+            x_mean = np.sum(w * x)
+            y_mean = np.sum(w * y)
+            
+            cov_xy = np.sum(w * (x - x_mean) * (y - y_mean))
+            
+            var_x = np.sum(w * (x - x_mean) ** 2)
+            var_y = np.sum(w * (y - y_mean) ** 2)
+            
+            if var_x > 0 and var_y > 0:
+                corr = cov_xy / (np.sqrt(var_x) * np.sqrt(var_y))
+            else:
+                corr = np.nan
+            
+        elif method == 'spearman':
+            # For Spearman, apply weights to ranks
+            # This is an approximation
+            x_ranks = stats.rankdata(x)
+            y_ranks = stats.rankdata(y)
+            
+            x_mean = np.sum(w * x_ranks)
+            y_mean = np.sum(w * y_ranks)
+            
+            cov_xy = np.sum(w * (x_ranks - x_mean) * (y_ranks - y_mean))
+            
+            var_x = np.sum(w * (x_ranks - x_mean) ** 2)
+            var_y = np.sum(w * (y_ranks - y_mean) ** 2)
+            
+            if var_x > 0 and var_y > 0:
+                corr = cov_xy / (np.sqrt(var_x) * np.sqrt(var_y))
+            else:
+                corr = np.nan
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        
+        result = {
+            'correlation': float(corr),
+            'method': method,
+            'weighted': True,
+            'n_observations': len(clean),
+            'effective_n': 1 / np.sum(w ** 2)  # Effective sample size
+        }
+        
+        print(f"  ✓ Weighted {method} correlation: {corr:.3f} "
+              f"(effective n={result['effective_n']:.0f})")
+        
+        return result
     
     def analyze_cross_modal_patterns(self,
                                     bicycle_df: pd.DataFrame,
@@ -317,18 +518,31 @@ class CorrelationAnalyzer:
         changes = heat_avg - normal_avg
         pct_changes = ((heat_avg - normal_avg) / normal_avg * 100).fillna(0)
         
-        # Create result
-        result = pd.DataFrame({
-            'mode': mode_cols,
-            'normal_avg': normal_avg.values,
-            'heat_avg': heat_avg.values,
-            'change': changes.values,
-            'pct_change': pct_changes.values
-        })
+        # Statistical significance test (t-test)
+        results_list = []
+        for col in mode_cols:
+            if col in normal.columns and col in heat.columns:
+                t_stat, t_pvalue = stats.ttest_ind(
+                    normal[col].dropna(),
+                    heat[col].dropna(),
+                    equal_var=False  # Welch's t-test
+                )
+                
+                results_list.append({
+                    'mode': col,
+                    'normal_avg': normal_avg[col],
+                    'heat_avg': heat_avg[col],
+                    'change': changes[col],
+                    'pct_change': pct_changes[col],
+                    't_statistic': t_stat,
+                    'p_value': t_pvalue,
+                    'is_significant': t_pvalue < 0.05,
+                    'effect': 'increase' if pct_changes[col] > 5 else (
+                        'decrease' if pct_changes[col] < -5 else 'stable'
+                    )
+                })
         
-        result['effect'] = result['pct_change'].apply(
-            lambda x: 'increase' if x > 5 else ('decrease' if x < -5 else 'stable')
-        )
+        result = pd.DataFrame(results_list)
         
         print(f"  ✓ Analyzed substitution effects for {len(mode_cols)} modes")
         
