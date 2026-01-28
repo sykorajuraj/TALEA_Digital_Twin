@@ -27,6 +27,9 @@ class MobilityImpactConfig:
     
     # Demand reduction factors
     HEAT_REDUCTION_FACTOR: float = 0.15  # 15% reduction in extreme heat
+    
+    # Time-dependent analysis
+    TIME_BINS: int = 48  # For 30-minute intervals in 24 hours
 
 
 class MobilityImpactAnalyzer:
@@ -116,6 +119,101 @@ class MobilityImpactAnalyzer:
         print(f"    Impact: {pct_change:+.1f}% in high heat")
         
         return results
+    
+    def analyze_time_dependent_correlation(self,
+                                          mobility_df: pd.DataFrame,
+                                          weather_df: pd.DataFrame,
+                                          count_col: str = 'Totale',
+                                          temp_col: str = 'temperature') -> Dict:
+        """
+        Analyze correlation accounting for time-of-day effects.
+        Based on learning conditional probability f(mobility|temp,time) rather than f(mobility,temp).
+        
+        This avoids spurious correlations where both mobility and temperature 
+        are influenced by time of day.
+        
+        Args:
+            mobility_df: Mobility data with datetime
+            weather_df: Weather data with temperature
+            count_col: Mobility count column
+            temp_col: Temperature column
+            
+        Returns:
+            Dictionary with time-dependent correlation analysis
+        """
+        # Merge datasets
+        merged = self._merge_mobility_weather(mobility_df, weather_df)
+        
+        if temp_col not in merged.columns or count_col not in merged.columns:
+            raise ValueError(f"Missing required columns")
+        
+        # Extract time of day (fractional hours)
+        merged = self._add_time_features(merged)
+        
+        # Analyze correlation within each time slot
+        time_slot_correlations = []
+        
+        # Group by hour to control for time-of-day effects
+        for hour in sorted(merged['hour'].unique()):
+            hour_data = merged[merged['hour'] == hour]
+            
+            clean = hour_data[[temp_col, count_col]].dropna()
+            
+            if len(clean) > 10:  # Need sufficient samples
+                corr, p_val = stats.pearsonr(clean[temp_col], clean[count_col])
+                
+                time_slot_correlations.append({
+                    'hour': int(hour),
+                    'correlation': float(corr),
+                    'p_value': float(p_val),
+                    'n_samples': len(clean),
+                    'is_significant': p_val < self.config.SIGNIFICANCE_LEVEL
+                })
+        
+        # Overall time-controlled correlation (average of within-slot correlations)
+        if time_slot_correlations:
+            avg_correlation = np.mean([tc['correlation'] for tc in time_slot_correlations])
+            significant_slots = sum(1 for tc in time_slot_correlations if tc['is_significant'])
+        else:
+            avg_correlation = np.nan
+            significant_slots = 0
+        
+        # Compare with naive correlation (not controlling for time)
+        clean_all = merged[[temp_col, count_col]].dropna()
+        naive_corr, naive_p = stats.pearsonr(clean_all[temp_col], clean_all[count_col])
+        
+        results = {
+            'time_controlled_correlation': float(avg_correlation) if not np.isnan(avg_correlation) else None,
+            'naive_correlation': float(naive_corr),
+            'naive_p_value': float(naive_p),
+            'significant_time_slots': significant_slots,
+            'total_time_slots': len(time_slot_correlations),
+            'by_time_slot': time_slot_correlations,
+            'interpretation': self._interpret_time_dependent_results(avg_correlation, naive_corr)
+        }
+        
+        print(f"  ✓ Time-controlled correlation: {avg_correlation:.3f}")
+        print(f"    Naive correlation: {naive_corr:.3f}")
+        print(f"    Significant slots: {significant_slots}/{len(time_slot_correlations)}")
+        
+        return results
+    
+    def _interpret_time_dependent_results(self, 
+                                         controlled_corr: float, 
+                                         naive_corr: float) -> str:
+        """Interpret the difference between controlled and naive correlations"""
+        
+        if np.isnan(controlled_corr) or np.isnan(naive_corr):
+            return "insufficient_data"
+        
+        diff = abs(controlled_corr - naive_corr)
+        
+        if diff < 0.1:
+            return "time_effect_minimal"
+        elif diff < 0.3:
+            return "moderate_time_confounding"
+        else:
+            return "strong_time_confounding"
     
     def analyze_pedestrian_heat_correlation(self,
                                            pedestrian_df: pd.DataFrame,
@@ -329,6 +427,72 @@ class MobilityImpactAnalyzer:
         
         return impact_df
     
+    def analyze_window_based_impact(self,
+                                   mobility_series: pd.Series,
+                                   temperature_series: pd.Series,
+                                   window_length: int = 24) -> Dict:
+        """
+        Analyze heat impact using rolling windows to capture delayed effects.
+        Based on PDF concepts: windows capture temporal dependencies.
+        
+        Args:
+            mobility_series: Time series of mobility counts
+            temperature_series: Time series of temperature
+            window_length: Rolling window size (e.g., 24 hours)
+            
+        Returns:
+            Dictionary with window-based analysis
+        """
+        # Align series
+        common_idx = mobility_series.index.intersection(temperature_series.index)
+        mobility = mobility_series.loc[common_idx]
+        temperature = temperature_series.loc[common_idx]
+        
+        # Compute rolling features
+        mobility_ma = mobility.rolling(window=window_length, min_periods=1).mean()
+        temp_ma = temperature.rolling(window=window_length, min_periods=1).mean()
+        
+        # Correlation between smoothed series
+        clean_data = pd.DataFrame({
+            'mobility_ma': mobility_ma,
+            'temp_ma': temp_ma
+        }).dropna()
+        
+        if len(clean_data) > 10:
+            corr, p_val = stats.pearsonr(clean_data['mobility_ma'], clean_data['temp_ma'])
+        else:
+            corr, p_val = np.nan, np.nan
+        
+        # Identify heat waves (sustained high temperature)
+        heat_wave_threshold = temperature.quantile(0.9)
+        heat_waves = (temp_ma > heat_wave_threshold)
+        
+        # Mobility during heat waves
+        if heat_waves.sum() > 0:
+            mobility_normal = mobility[~heat_waves].mean()
+            mobility_heatwave = mobility[heat_waves].mean()
+            heatwave_impact = ((mobility_heatwave - mobility_normal) / mobility_normal * 100) if mobility_normal > 0 else np.nan
+        else:
+            mobility_normal = mobility.mean()
+            mobility_heatwave = np.nan
+            heatwave_impact = np.nan
+        
+        results = {
+            'window_length': window_length,
+            'smoothed_correlation': float(corr) if not np.isnan(corr) else None,
+            'smoothed_p_value': float(p_val) if not np.isnan(p_val) else None,
+            'heat_wave_days': int(heat_waves.sum()),
+            'mobility_normal': float(mobility_normal),
+            'mobility_heatwave': float(mobility_heatwave) if not np.isnan(mobility_heatwave) else None,
+            'heatwave_impact_pct': float(heatwave_impact) if not np.isnan(heatwave_impact) else None
+        }
+        
+        print(f"  ✓ Window-based analysis (window={window_length})")
+        print(f"    Smoothed correlation: {corr:.3f}")
+        print(f"    Heat wave impact: {heatwave_impact:+.1f}%" if not np.isnan(heatwave_impact) else "    No heat waves detected")
+        
+        return results
+    
     def _merge_mobility_weather(self,
                                mobility_df: pd.DataFrame,
                                weather_df: pd.DataFrame) -> pd.DataFrame:
@@ -365,3 +529,24 @@ class MobilityImpactAnalyzer:
         merged = mobility.merge(weather, on='merge_key', how='left', suffixes=('', '_weather'))
         
         return merged
+    
+    def _add_time_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add time-of-day features"""
+        
+        df = df.copy()
+        
+        # Find datetime column
+        date_col = None
+        for col in ['datetime', 'Data', 'data']:
+            if col in df.columns:
+                date_col = col
+                break
+        
+        if date_col:
+            df[date_col] = pd.to_datetime(df[date_col])
+            if 'hour' not in df.columns:
+                df['hour'] = df[date_col].dt.hour
+            if 'minute' not in df.columns:
+                df['minute'] = df[date_col].dt.minute
+        
+        return df
