@@ -347,7 +347,8 @@ class WeatherPreprocessor:
         
         # Extract temporal feature if not present
         if groupby_column not in df.columns:
-            dt = pd.to_datetime(df[ColumnNames.DATETIME.value])
+            dt = pd.to_datetime(df[ColumnNames.DATETIME.value], utc=True)
+            dt = dt.tz_localize(None)
             if groupby_column == 'hour':
                 df[groupby_column] = dt.dt.hour
             elif groupby_column == 'weekday':
@@ -569,7 +570,7 @@ class WeatherPreprocessor:
             raise ValueError("Dataframe must contain datetime column")
         
         # Ensure no timezone
-        df[ColumnNames.DATETIME.value] = pd.to_datetime(df[ColumnNames.DATETIME.value])
+        df[ColumnNames.DATETIME.value] = pd.to_datetime(df[ColumnNames.DATETIME.value], utc=True)
         if df[ColumnNames.DATETIME.value].dt.tz is not None:
             df[ColumnNames.DATETIME.value] = df[ColumnNames.DATETIME.value].dt.tz_localize(None)
         
