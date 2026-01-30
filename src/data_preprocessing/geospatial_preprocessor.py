@@ -57,35 +57,49 @@ class GeospatialPreprocessor:
     def clean_street_network(self, df: pd.DataFrame) -> gpd.GeoDataFrame:
         """
         Clean street network data
-        
+
         Args:
-            df: Raw street network dataframe
-            
+            df: Raw street network dataframe (should already be GeoDataFrame with LineStrings)
+
         Returns:
             GeoDataFrame with cleaned street network
         """
-        gdf = self._ensure_geodataframe(df)
-        
+        # MODIFIED: Check if already a GeoDataFrame with LineStrings
+        if isinstance(df, gpd.GeoDataFrame) and 'geometry' in df.columns:
+            gdf = df.copy()
+            print("  ✓ Using existing GeoDataFrame")
+        else:
+            # This was the problem - don't try to convert from coordinates
+            # Street networks should already be GeoDataFrames with LineStrings
+            raise ValueError(
+                "Street network must be a GeoDataFrame with LineString geometries. "
+                f"Got: {type(df)}"
+            )
+
         # Convert to projected CRS for accurate measurements
         if gdf.crs is None:
             gdf = gdf.set_crs(f"EPSG:{self.config.WGS84_EPSG}")
-        
+
         gdf_projected = gdf.to_crs(f"EPSG:{self.config.PROJECTED_EPSG}")
-        
+
         # Clean geometry
         gdf_projected = gdf_projected[gdf_projected.geometry.notna()]
         gdf_projected = gdf_projected[gdf_projected.geometry.is_valid]
-        
+
+        # Filter to LineString/MultiLineString only
+        valid_types = gdf_projected.geometry.type.isin(['LineString', 'MultiLineString'])
+        gdf_projected = gdf_projected[valid_types]
+
         # Remove duplicate geometries
         gdf_projected = gdf_projected.drop_duplicates(subset='geometry')
-        
+
         # Add basic attributes
         if 'length_m' not in gdf_projected.columns:
             gdf_projected['length_m'] = gdf_projected.geometry.length
-        
+
         # Convert back to WGS84 for consistency
         gdf = gdf_projected.to_crs(f"EPSG:{self.config.WGS84_EPSG}")
-        
+
         print(f"  ✓ Cleaned street network: {len(gdf):,} segments")
         return gdf
     
