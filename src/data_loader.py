@@ -5,6 +5,7 @@ Author: Juraj Sýkora
 Organization: Alma Mater Studiorum - Università di Bologna
 
 Simple, modular data loading utilities for the TALEA project.
+For internal loading of datasets is TALEADataLoader in data_preprocessor.py
 """
 
 import pandas as pd
@@ -84,15 +85,20 @@ class DataLoader:
         )
     }
     
-    def __init__(self, data_dir: Union[str, Path] = 'dataset'):
+    def __init__(self, data_dir: Union[str, Path]):
         """
         Initialize data loader
         
         Args:
-            data_dir: Base directory for data files
+            data_dir: Base directory for data files (relative or absolute path)
         """
         self.data_dir = Path(data_dir)
         self.loaded_datasets = {}
+        
+        # Validate that the data directory exists
+        if not self.data_dir.exists():
+            print(f"⚠ Warning: Data directory does not exist: {self.data_dir.resolve()}")
+            print(f"   Current working directory: {Path.cwd()}")
     
     def load(self,
             dataset_name: str,
@@ -122,7 +128,11 @@ class DataLoader:
             file_path = Path(path)
         
         if not file_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
+            raise FileNotFoundError(
+                f"File not found: {file_path.resolve()}\n"
+                f"Data directory: {self.data_dir.resolve()}\n"
+                f"Current working directory: {Path.cwd()}"
+            )
         
         # Load data
         try:
@@ -157,7 +167,9 @@ class DataLoader:
         
         print("=" * 70)
         print("LOADING DATASETS")
-        print("=" * 70 + "\n")
+        print("=" * 70)
+        print(f"Data directory: {self.data_dir.resolve()}")
+        print(f"Working directory: {Path.cwd()}\n")
         
         for name in dataset_names:
             try:
@@ -165,7 +177,7 @@ class DataLoader:
                 results[name] = df
             except Exception as e:
                 if skip_missing:
-                    print(f"⚠ Skipped {name}: {str(e)}")
+                    print(f"⚠ Skipped {name}: {str(e).split(chr(10))[0]}")
                 else:
                     raise
         
@@ -271,7 +283,7 @@ class DataLoader:
 # Convenience functions
 
 def load_dataset(dataset_name: str,
-                data_dir: Union[str, Path] = 'dataset',
+                data_dir: Union[str, Path],
                 **kwargs) -> pd.DataFrame:
     """
     Quick load a single dataset
@@ -288,7 +300,7 @@ def load_dataset(dataset_name: str,
     return loader.load(dataset_name, **kwargs)
 
 
-def load_mobility_data(data_dir: Union[str, Path] = 'dataset',
+def load_mobility_data(data_dir: Union[str, Path],
                       **kwargs) -> Dict[str, pd.DataFrame]:
     """
     Load all mobility datasets
@@ -304,7 +316,7 @@ def load_mobility_data(data_dir: Union[str, Path] = 'dataset',
     return loader.load_by_type('mobility', **kwargs)
 
 
-def load_weather_data(data_dir: Union[str, Path] = 'dataset',
+def load_weather_data(data_dir: Union[str, Path],
                      **kwargs) -> Dict[str, pd.DataFrame]:
     """
     Load all weather datasets
@@ -320,7 +332,7 @@ def load_weather_data(data_dir: Union[str, Path] = 'dataset',
     return loader.load_by_type('weather', **kwargs)
 
 
-def load_geospatial_data(data_dir: Union[str, Path] = 'dataset',
+def load_geospatial_data(data_dir: Union[str, Path],
                         **kwargs) -> Dict[str, pd.DataFrame]:
     """
     Load all geospatial datasets

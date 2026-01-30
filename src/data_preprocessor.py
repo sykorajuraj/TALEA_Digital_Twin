@@ -125,8 +125,8 @@ class DatasetConfig:
 
 # DATA LOADER
 
-class DataLoader:
-    """Handles loading and initial validation of datasets"""
+class TALEADataLoader:
+    """Internal loading and initial validation of datasets for effective preprocessing"""
     
     DATASETS = {
         'bicycle': DatasetConfig(
