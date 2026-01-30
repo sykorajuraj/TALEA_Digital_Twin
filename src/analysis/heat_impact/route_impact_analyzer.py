@@ -66,16 +66,28 @@ class RouteImpactAnalyzer:
             network['heat_exposure'].median()
         )
         
+        heat = network['heat_exposure']
+
         # Classify exposure levels
-        network['exposure_level'] = pd.cut(
-            network['heat_exposure'],
-            bins=[network['heat_exposure'].min(),
-                  network['heat_exposure'].quantile(0.33),
-                  network['heat_exposure'].quantile(0.67),
-                  network['heat_exposure'].max()],
-            labels=['low', 'moderate', 'high'],
-            include_lowest=True
-        )
+        if heat.nunique() < 3 or heat.max() == heat.min():
+            # Not enough variation to classify meaningfully
+            network['exposure_level'] = 'moderate'
+        else:
+            q33 = heat.quantile(0.33)
+            q67 = heat.quantile(0.67)
+
+            bins = [heat.min(), q33, q67, heat.max()]
+
+            # Ensure strictly increasing bin edges
+            if len(np.unique(bins)) < 4:
+                network['exposure_level'] = 'moderate'
+            else:
+                network['exposure_level'] = pd.cut(
+                    heat,
+                    bins=bins,
+                    labels=['low', 'moderate', 'high'],
+                    include_lowest=True
+                )
         
         print(f"  ✓ Computed heat exposure for {len(network)} route segments")
         

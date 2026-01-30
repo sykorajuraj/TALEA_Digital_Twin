@@ -67,7 +67,7 @@ class SpatialPatternAnalyzer:
         """Compute kernel density estimation hotspots"""
         
         # Get coordinates
-        coords = np.array([[p.x, p.y] for p in gdf.geometry])
+        coords = np.array([[geom.centroid.x, geom.centroid.y] for geom in gdf.geometry])
         values = gdf[value_col].values
         
         # Compute pairwise distances
@@ -105,7 +105,7 @@ class SpatialPatternAnalyzer:
             Dictionary with autocorrelation statistics
         """
         # Get coordinates
-        coords = np.array([[p.x, p.y] for p in gdf.geometry])
+        coords = np.array([[geom.centroid.x, geom.centroid.y] for geom in gdf.geometry])
         values = gdf[value_col].values
         
         # Compute distance matrix

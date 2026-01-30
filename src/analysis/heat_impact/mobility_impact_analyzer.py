@@ -9,7 +9,7 @@ Analyzes heat impact on bicycle and pedestrian mobility.
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from scipy import stats
 from dataclasses import dataclass
 
@@ -518,8 +518,15 @@ class MobilityImpactAnalyzer:
         mobility = mobility_df.copy()
         weather = weather_df.copy()
         
-        mobility[mob_date_col] = pd.to_datetime(mobility[mob_date_col])
-        weather[weather_date_col] = pd.to_datetime(weather[weather_date_col])
+        mobility[mob_date_col] = (
+            pd.to_datetime(mobility[mob_date_col], utc=True)
+            .dt.tz_convert(None)
+        )
+
+        weather[weather_date_col] = (
+            pd.to_datetime(weather[weather_date_col], utc=True)
+            .dt.tz_convert(None)
+        )
         
         # Create merge key (date only for daily data, datetime for hourly)
         mobility['merge_key'] = mobility[mob_date_col].dt.date

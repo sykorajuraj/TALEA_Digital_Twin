@@ -149,21 +149,36 @@ class TemporalPatternAnalyzer:
         if 'hour' not in df.columns:
             raise ValueError("Cannot derive hour from data")
         
-        # Aggregate by hour
-        hourly = df.groupby('hour')[value_col].mean().sort_values(ascending=False)
-        
-        # Get top n peaks
-        top_peaks = hourly.head(n_peaks)
-        
-        peak_info = {
-            'peak_hours': top_peaks.index.tolist(),
-            'peak_values': top_peaks.values.tolist(),
-            'hourly_pattern': hourly.to_dict()
-        }
-        
-        print(f"  ✓ Identified {n_peaks} peak hours: {peak_info['peak_hours']}")
-        
-        return peak_info
+        # Handle both single column and list of columns
+        if isinstance(value_col, list):
+            # Process each column separately
+            results = {}
+            for col in value_col:
+                hourly = df.groupby('hour')[col].mean().sort_values(ascending=False)
+                top_peaks = hourly.head(n_peaks)
+                
+                results[col] = {
+                    'peak_hours': top_peaks.index.tolist(),
+                    'peak_values': top_peaks.values.tolist(),
+                    'hourly_pattern': hourly.to_dict()
+                }
+            
+            print(f"  ✓ Identified {n_peaks} peak hours for {len(value_col)} columns")
+            return results
+        else:
+            # Single column processing
+            hourly = df.groupby('hour')[value_col].mean().sort_values(ascending=False)
+            top_peaks = hourly.head(n_peaks)
+            
+            peak_info = {
+                'peak_hours': top_peaks.index.tolist(),
+                'peak_values': top_peaks.values.tolist(),
+                'hourly_pattern': hourly.to_dict()
+            }
+            
+            print(f"  ✓ Identified {n_peaks} peak hours: {peak_info['peak_hours']}")
+            
+            return peak_info
     
     def compute_autocorrelation(self,
                                df: pd.DataFrame,
